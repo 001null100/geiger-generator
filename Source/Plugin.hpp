@@ -33,6 +33,8 @@ private:
     bool implementsTimerSupport() const noexcept override {return true;}
     void onTimer(clap_id) noexcept override;
     void updateTransport(const clap_event_transport_t&) noexcept;
+    void initialiseBlockTransport() noexcept;
+    clap_process_status processFinished() noexcept override {blockTransportReady_=false; return CLAP_PROCESS_CONTINUE;}
     void midi(const clap_event_midi_t&) noexcept;
     geiger::Values readValues() const noexcept;
     struct Note {std::uint8_t held=0; bool sustained=false; double velocity=0; std::uint64_t order=0;};
@@ -46,7 +48,7 @@ private:
     std::uint64_t noteOrder_=0;
     std::atomic<std::uint32_t> requestedClicks_{0};
     std::atomic<bool> requestedPanic_{false};
-    bool playing_=false, restartTransport_=false, pumping_=false;
+    bool playing_=false, restartTransport_=false, pumping_=false, blockTransportReady_=false;
     float scopePeak_=0, meterPeak_=0;
     std::uint32_t scopeSamples_=0, scopeHead_=0;
 };

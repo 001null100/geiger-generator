@@ -48,10 +48,29 @@ int main() {
         process.in_events=&empty.input; for(int i=0;i<10;++i) plugin->process(plugin,&process);
         before=instance->telemetry().detected.load(); for(int i=0;i<20;++i) plugin->process(plugin,&process);
         require(instance->telemetry().detected.load()==before,"MIDI gate stuck after sustain release");
+        // Duplicate/unmatched note-off under a new sustain pedal must not resurrect an old note.
+        notes.items={&pedal.header,&off.header}; process.in_events=&notes.input; plugin->process(plugin,&process);
+        process.in_events=&empty.input; plugin->process(plugin,&process);
+        require(!instance->telemetry().running.load(),"Stray note-off resurrected a sustained note");
+        notes.items={&pedalUp.header}; process.in_events=&notes.input; plugin->process(plugin,&process);
+        process.in_events=&empty.input;
         std::array<double,512> dl{},dr{}; double* doubles[]{dl.data(),dr.data()}; output.data32=nullptr; output.data64=doubles;
         instance->testClick(); plugin->process(plugin,&process);
         require(std::any_of(dl.begin(),dl.end(),[](double x){return std::abs(x)>1e-7;}),"64-bit audition output silent");
         for(double x:dl) require(std::isfinite(x),"64-bit output nonfinite");
+        // Offset-zero transport events override the block's initial snapshot.
+        clap_event_transport_t stopped{},playing{};
+        stopped.header={sizeof(stopped),0,CLAP_CORE_EVENT_SPACE_ID,CLAP_EVENT_TRANSPORT,0};
+        playing=stopped; playing.flags=CLAP_TRANSPORT_IS_PLAYING;
+        mode=parameter(geiger::RunMode,1); notes.items={&mode.header,&playing.header};
+        process.transport=&stopped; process.in_events=&notes.input;
+        plugin->process(plugin,&process);
+        require(instance->telemetry().running.load(),"Block snapshot overwrote offset-zero Play event");
+        // Mid-block Stop closes the gate at the original sample offset.
+        process.transport=&playing; stopped.header.time=256; notes.items={&stopped.header};
+        plugin->process(plugin,&process);
+        require(!instance->telemetry().running.load(),"Mid-block Stop was ignored");
+        process.transport=nullptr; process.in_events=&empty.input;
         plugin->stop_processing(plugin); plugin->deactivate(plugin);
         std::vector<std::byte> saved;
         clap_ostream_t stream{&saved,[](const clap_ostream_t* s,const void* p,std::uint64_t n)->std::int64_t {
@@ -64,8 +83,7 @@ int main() {
             auto& rd=*static_cast<Reader*>(s->ctx); auto count=std::min<std::uint64_t>(n,rd.bytes->size()-rd.offset); std::memcpy(p,rd.bytes->data()+rd.offset,static_cast<std::size_t>(count)); rd.offset+=static_cast<std::size_t>(count); return static_cast<std::int64_t>(count);
         }};
         require(state->load(plugin,&input),"State load failed"); double restored=0; params->get_value(plugin,geiger::parameterId(geiger::Rate),&restored); require(restored==1000,"State did not restore native value");
-        // Destroy through the CLAP lifecycle, not the unique_ptr's default deleter.
         instance.release(); plugin->destroy(plugin);
-        std::cout<<"PASS CLAP metadata, event offsets, MIDI gate, sustain, 64-bit audition and state round trip\n";
+        std::cout<<"PASS CLAP metadata, sample-offset transport/MIDI, sustain edge cases, 64-bit audition and state round trip\n";
     } catch(const std::exception& e) {std::cerr<<"FAIL: "<<e.what()<<"\n"; return 1;}
 }

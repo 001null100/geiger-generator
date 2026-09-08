@@ -59,7 +59,7 @@ bool GeigerPlugin::onActivate(double sr,std::uint32_t,std::uint32_t) noexcept {
     engine_.configure(readValues()); const bool ok=engine_.prepare(sr); onReset(); return ok;
 }
 void GeigerPlugin::onReset() noexcept {
-    engine_.reset(); notes_={}; sustain_={}; noteOrder_=0; playing_=false; restartTransport_=false;
+    engine_.reset(); notes_={}; sustain_={}; noteOrder_=0; playing_=false; restartTransport_=false; blockTransportReady_=false;
     scopePeak_=meterPeak_=0; scopeSamples_=scopeHead_=0;
     requestedClicks_.store(0,std::memory_order_relaxed);
     telemetry_.cps=0; telemetry_.incoming=0; telemetry_.peak=0; telemetry_.detected=0; telemetry_.missed=0; telemetry_.running=false;
@@ -67,14 +67,12 @@ void GeigerPlugin::onReset() noexcept {
     telemetry_.scopeHead.store(0,std::memory_order_release);
 }
 void GeigerPlugin::testClick() noexcept {
-    // A bounded command, not a parameter. No host automation is recorded for audition.
     auto n=requestedClicks_.load(std::memory_order_relaxed);
     while(n<8 && !requestedClicks_.compare_exchange_weak(n,n+1,std::memory_order_relaxed)) {}
     if(host_->request_process) host_->request_process(host_);
 }
 void GeigerPlugin::panic() noexcept {
     requestedPanic_.store(true,std::memory_order_release);
-    // Stop free-running generation as well as clearing held notes and ringing.
     beginParameterGesture(geiger::parameterId(geiger::Power));
     setParameterFromGui(geiger::parameterId(geiger::Power),0);
     endParameterGesture(geiger::parameterId(geiger::Power));
@@ -84,9 +82,17 @@ void GeigerPlugin::applyPreset(std::size_t index) noexcept {
     if(index>=geiger::presetNames.size()) return;
     const auto v=geiger::preset(index);
     for(std::size_t i=0;i<geiger::Count;++i) {
-        // Auditioning a preset must not turn up the user's level, change gating, or power on unexpectedly.
+        // Presets must not raise the user's level, change gating, or unexpectedly power on.
         if(i==geiger::Output || i==geiger::Power || i==geiger::RunMode || i==geiger::Seed) continue;
         const auto id=geiger::parameterId(i); beginParameterGesture(id); setParameterFromGui(id,v[i]); endParameterGesture(id);
+    }
+}
+void GeigerPlugin::initialiseBlockTransport() noexcept {
+    // The block snapshot precedes sample-offset events, including events at zero.
+    // Do not reapply the snapshot after an offset-zero transport event.
+    if(!blockTransportReady_ && currentProcess()) {
+        blockTransportReady_=true;
+        if(currentProcess()->transport) updateTransport(*currentProcess()->transport);
     }
 }
 void GeigerPlugin::updateTransport(const clap_event_transport_t& t) noexcept {
@@ -103,8 +109,10 @@ void GeigerPlugin::midi(const clap_event_midi_t& e) noexcept {
         if(n.held<255) ++n.held;
         n.sustained=false; n.velocity=value/127.0; n.order=++noteOrder_;
     } else if(type==0x80 || (type==0x90 && value==0)) {
-        if(n.held>0) --n.held;
-        if(n.held==0) n.sustained=sustain_[ch];
+        if(n.held>0) {
+            --n.held;
+            if(n.held==0) n.sustained=sustain_[ch];
+        }
     } else if(type==0xb0) {
         if(key==64) {
             sustain_[ch]=value>=64;
@@ -118,12 +126,13 @@ void GeigerPlugin::midi(const clap_event_midi_t& e) noexcept {
     }
 }
 void GeigerPlugin::onEvent(const clap_event_header_t& h) noexcept {
+    initialiseBlockTransport();
     if(h.space_id!=CLAP_CORE_EVENT_SPACE_ID) return;
     if(h.type==CLAP_EVENT_MIDI && h.size>=sizeof(clap_event_midi_t)) midi(reinterpret_cast<const clap_event_midi_t&>(h));
     if(h.type==CLAP_EVENT_TRANSPORT && h.size>=sizeof(clap_event_transport_t)) updateTransport(reinterpret_cast<const clap_event_transport_t&>(h));
 }
 void GeigerPlugin::processAudio(const clap_process_t& process,std::uint32_t start,std::uint32_t end) noexcept {
-    if(start==0 && process.transport) updateTransport(*process.transport);
+    initialiseBlockTransport();
     const auto v=readValues(); engine_.configure(v);
     if(requestedPanic_.exchange(false,std::memory_order_acq_rel)) {engine_.reset(); notes_={}; sustain_={};}
     const int mode=static_cast<int>(v[geiger::RunMode]);
@@ -188,8 +197,7 @@ void GeigerPlugin::stopGuiTimer() noexcept {
 }
 void GeigerPlugin::onTimer(clap_id id) noexcept {
 #if JUCE_LINUX
-    // X11 hosts do not pump JUCE's event queue. Use their main-thread CLAP timer,
-    // never a private UI thread or an audio-thread message callback.
+    // X11 hosts do not pump JUCE's event queue. Use their main-thread CLAP timer.
     if(id==timerId_ && !pumping_) {
         pumping_=true;
         if(auto* mm=juce::MessageManager::getInstanceWithoutCreating()) mm->runDispatchLoopUntil(1);
