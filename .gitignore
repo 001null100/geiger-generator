@@ -1,0 +1,8 @@
+build*/
+audio-demos/
+ui-smoke/
+dist/
+*.clap
+*.wav
+*.o
+.DS_Store

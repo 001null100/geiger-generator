@@ -1,0 +1,117 @@
+name: Build, validate and release
+on:
+  push:
+    branches: [main]
+    paths-ignore: [.github/workflows/dependency-sources.yml]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: geiger-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential pkg-config libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev libfreetype6-dev libfontconfig1-dev libgl1-mesa-dev xvfb
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+      - name: DSP and host regression tests
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: UI smoke images (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a ./build/GeigerUiSmoke "$PWD/ui-smoke"
+      - name: UI smoke images (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ./build/Release/GeigerUiSmoke.exe "$PWD/ui-smoke"
+          if ($LASTEXITCODE -ne 0) { throw "UI smoke test failed" }
+      - name: Validate CLAP (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://github.com/free-audio/clap-validator/releases/download/0.4.1/clap-validator-0.4.1-127-g152b982-windows.zip" -OutFile validator.zip
+          Expand-Archive validator.zip -DestinationPath validator
+          $validator = Get-ChildItem validator -Recurse -Filter clap-validator.exe | Select-Object -First 1
+          if (-not $validator) { throw "Validator missing" }
+          & $validator.FullName validate "$PWD/build/clap/GeigerGenerator.clap" --only-failed
+          if ($LASTEXITCODE -ne 0) { throw "CLAP validation failed" }
+      - name: Validate CLAP (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL https://github.com/free-audio/clap-validator/releases/download/0.4.1/clap-validator-0.4.1-127-g152b982-ubuntu-22.04.zip -o validator.zip
+          unzip -q validator.zip -d validator-package
+          mkdir validator
+          tar -xzf "$(find validator-package -name '*.tar.gz' | head -n 1)" -C validator
+          VALIDATOR="$(find validator -type f -name clap-validator | head -n 1)"
+          test -n "$VALIDATOR"
+          chmod +x "$VALIDATOR"
+          xvfb-run -a "$VALIDATOR" validate "$PWD/build/clap/GeigerGenerator.clap" --only-failed
+      - name: Package validated CLAP
+        run: python tools/Package.py ${{ runner.os }}
+      - name: Render audio examples
+        if: runner.os == 'Linux'
+        run: |
+          ./build/GeigerRender audio-demos
+          cp README.md audio-demos/README.md
+          (cd audio-demos && zip -q ../dist/GeigerGenerator-Audio-Demos.zip *)
+      - uses: actions/upload-artifact@v6
+        with:
+          name: GeigerGenerator-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: GeigerGenerator-UI-${{ runner.os }}
+          path: ui-smoke/*.png
+          if-no-files-found: warn
+  release:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: GeigerGenerator-*
+          path: artifacts
+      - name: Publish verified preview build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release
+          cp artifacts/GeigerGenerator-Windows/*.zip release/
+          cp artifacts/GeigerGenerator-Linux/*.zip release/
+          cp artifacts/GeigerGenerator-UI-Windows/geiger-1120-page-1.png release/GeigerGenerator-UI.png
+          (cd release && sha256sum *.zip > SHA256SUMS.txt)
+          cat > notes.md <<NOTES
+          Geiger Generator 0.1.0 preview, source commit $GITHUB_SHA.
+
+          Windows x64 and Linux x86_64 CLAP builds. Both platforms passed DSP tests, actual plug-in host/state tests, editor rendering checks and clap-validator before publication. Manual Bitwig testing is still required; see docs/TESTING.md.
+
+          37 parameters, six click models, five transducers, nine presets. Random detector arrivals, non-extendable dead time and recovery feed a synthesized pulse/case response. This is a sound instrument, not a dosimeter.
+
+          Download the Windows or Linux CLAP ZIP, extract GeigerGenerator.clap into your host's CLAP folder, and rescan. Audio demo WAVs and an actual UI screenshot are attached separately.
+          NOTES
+          gh release create "v0.1.0-preview.${{ github.run_number }}" release/* --prerelease --target "$GITHUB_SHA" --title "Geiger Generator 0.1.0 preview ${{ github.run_number }}" --notes-file notes.md
