@@ -3,6 +3,8 @@ project(GeigerGenerator VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# Every static dependency linked into the CLAP module must be position-independent.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 include(CTest)
 include(FetchContent)
 option(GEIGER_BUILD_PLUGIN "Build the CLAP and native GUI" ON)
