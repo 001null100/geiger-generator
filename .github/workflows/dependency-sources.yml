@@ -1,0 +1,32 @@
+name: Dependency sources
+on:
+  workflow_dispatch:
+  push:
+    paths: [.github/workflows/dependency-sources.yml]
+permissions:
+  contents: read
+jobs:
+  sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Fetch pinned source dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir dependencies
+          git clone https://github.com/001null100/null-clap.git dependencies/null_clap
+          git -C dependencies/null_clap checkout 8612a19fbe7fbe81b249c22e1593da18bb998b97
+          git clone https://github.com/free-audio/clap.git dependencies/clap
+          git -C dependencies/clap checkout a47f6badb49d948fd009998f28309cdab78979c9
+          git clone https://github.com/free-audio/clap-helpers.git dependencies/clap_helpers
+          git -C dependencies/clap_helpers checkout c35dd4906bd8efbb900cb2b89e680fed463cc8b1
+          git clone --depth 1 --branch 9.0.0 https://github.com/juce-framework/JUCE.git dependencies/juce
+          find dependencies -type d -name .git -prune -exec rm -rf '{}' +
+      - uses: actions/upload-artifact@v6
+        with:
+          name: pinned-dependency-sources
+          path: dependencies
+          retention-days: 7
+          if-no-files-found: error
