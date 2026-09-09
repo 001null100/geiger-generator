@@ -1,4 +1,4 @@
-# Geiger Generator
+# Geiger Generator 1.0
 
 A physical-inspired, deeply adjustable Geiger-counter sound instrument, built on **null-clap**. Native CLAP for **Windows x64 and Linux x86_64**, with a dark indigo / amber instrument panel. JUCE is used only for drawing, controls and native windows.
 
@@ -17,21 +17,25 @@ There are **37 host parameters**, with native-unit automation, monophonic modula
 | Area | Controls |
 | --- | --- |
 | Radiation field | Intensity (0-12,000 incoming counts/s), background, randomness, tube dead time, recovery, afterpulses, clusters, wander and wander speed, source motion depth/rate |
-| Click circuit | Six click models, pulse width, pitch, decay, sharpness, crackle, body and per-event variation |
+| Click circuit | Eight click models, pulse width, pitch, decay, sharpness, crackle, body and per-event variation |
 | Speaker | Five transducers, enclosure resonance, tone, drive, hiss, 50/60 Hz hum, stereo scatter, listening distance, density compensation and output |
 | Performance | Free / transport / MIDI gate, gate attack/release, optional MIDI pitch, seed, restart-on-play and power |
 
-**Click models:** Classic tube, Pocket piezo, Vintage counter, Relay snap, Soft tick, Glass particle.
+**Click models:** Classic tube, Pocket piezo, Vintage counter, Relay snap, Soft tick, Glass particle, Ceramic tap, Wire ping.
 
 **Speakers:** Direct circuit, Small speaker, Piezo disc, Metal enclosure, Field radio. They can be combined freely with every click model.
 
-**Presets:** Bench / classic, Pocket survey, Vintage civil defense, Hot zone, Glass particles, Relay rain, Drifting field, Rhythmic dosimeter, Soft dust. Preset selection preserves output level, power, run mode and seed. These names describe sounds, not radiation safety categories.
+**20 presets:** Bench / classic, Pocket survey, Vintage civil defense, Hot zone, Glass particles, Relay rain, Drifting field, Rhythmic dosimeter, Soft dust, Velvet reactor, Ion storm, Ceramic drizzle, Wire constellation, Deep containment, Distant fallout, Faulty quench, Pulse engine, Glass tide, Night survey, Critical mass.
+
+The selected name stays visible; `*` means the sound has been edited. Preset provenance is saved in project state and survives reopening the editor. Previous/next buttons make browsing immediate. Preset selection preserves output level, power, run mode and seed. These names describe sounds, not radiation safety categories.
+
+For dense sounds, try **Velvet reactor** or **Critical mass**. **Density balance** now controls headroom before saturation using the actual accepted count rate, with smoothing. This avoids simply turning down an already flattened signal. Turn it down for more natural density-driven level growth. Drive and output protection use antiderivative-antialiased soft clipping, and crackle overlaps add energy instead of correlated envelopes. Start quietly when comparing settings.
 
 ## The panel
 
-The large intensity dial spans quiet individual ticks through dense crackle. **Probe playground** is a two-dimensional performance surface: left/right changes source intensity; up/down changes listening distance. The meter reports accepted counts per second, actual tube losses, and a recent output peak trace. It is fed by the audio engine, not a decorative random animation.
+The large intensity dial spans quiet individual ticks through dense crackle. **Probe playground** is a two-dimensional performance surface: left/right changes source intensity; up/down changes listening distance. The meter reports accepted counts per second, actual tube losses, and a recent signed output pulse trace. It is fed by the audio engine, not a decorative random animation.
 
-Four tabs keep the controls legible. Double-click knobs to restore defaults, type values below them, or drag vertically. Keyboard focus is visible. Hover for short help. **Calm display** removes the activity glow while keeping useful readouts. The editor resizes from 900 x 660 logical pixels and converts host physical-pixel sizes at high DPI.
+Four tabs keep the controls legible. Double-click knobs to restore defaults, type values below them, or drag vertically. Keyboard focus is visible. Hover or adjust a control for short help and a parameter-specific explanation. The right-hand explorer renders an isolated click waveform or spectrum for sound controls, and shows labelled timing, recovery, intensity, density, stereo and gate/seed diagrams for the other categories. A gray comparison changes only the focused control to its default. These cached previews do not invent live detector activity; actual counts remain in the left meter. The Field tab's **Probe pad** button returns to the rate/distance surface. **Calm display** removes the activity glow while keeping useful readouts. The editor resizes from 900 x 660 logical pixels and converts host physical-pixel sizes at high DPI.
 
 ## What is physically inspired?
 
@@ -60,7 +64,11 @@ ctest --test-dir build-dsp -C Release --output-on-failure
 ./build-dsp/GeigerRender audio-demos
 ```
 
-See [TESTING.md](docs/TESTING.md) for automated coverage, limitations and the manual Bitwig checklist. The build workflow publishes a pre-release only after **both platforms** build, pass DSP/host tests, render UI smoke images and pass clap-validator. Source commits alone are not proof of a usable release.
+See [TESTING.md](docs/TESTING.md) for automated coverage, limitations and the manual Bitwig checklist. The build workflow publishes a versioned release only after **both platforms** build, pass DSP/allocation/host tests, render UI smoke images and pass clap-validator; uploaded files are checked before the draft is published. Source commits alone are not proof of a usable release.
+
+## Upgrading from the preview
+
+The 37 parameter IDs, plug-in identity and port/remote-page IDs are unchanged. Old project states load without the new preset metadata. Exact matching patches can infer a name; otherwise they show **Custom sound**. Acoustic refinements mean 1.0 is not a bit-identical renderer of 0.1 patches. Existing Density balance values are retained, so an old patch at 0% does not silently switch to the new 45% default. Keep the preview ZIP for exact old renders and save a copy of important projects. Full changes: [1.0 release notes](docs/RELEASE_NOTES_1.0.md).
 
 ## Platform notes
 

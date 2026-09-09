@@ -9,6 +9,8 @@ import zipfile
 root = Path(__file__).resolve().parents[1]
 build = root / "build"
 platform = sys.argv[1]
+if platform not in ("Windows", "Linux"):
+    raise ValueError("Expected Windows or Linux")
 claps = list((build / "clap").glob("GeigerGenerator.clap"))
 if len(claps) != 1:
     raise RuntimeError("Expected exactly one built CLAP module")
@@ -42,7 +44,7 @@ for dep in ("null_clap", "clap", "clap_helpers", "juce"):
                     target = licences / "juce" / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(file, target)
-(stage / "BUILD.txt").write_text("Commit: " + os.getenv("GITHUB_SHA", "local") + "\nPlatform: " + platform + "\n", encoding="utf-8")
+(stage / "BUILD.txt").write_text("Version: 1.0.0\nCommit: " + os.getenv("GITHUB_SHA", "local") + "\nPlatform: " + platform + "\n", encoding="utf-8")
 dist = root / "dist"
 dist.mkdir(exist_ok=True)
 with zipfile.ZipFile(dist / f"GeigerGenerator-{platform}-CLAP.zip", "w", zipfile.ZIP_DEFLATED) as archive:

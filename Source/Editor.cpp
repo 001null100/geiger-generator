@@ -1,6 +1,7 @@
 #include "Editor.hpp"
 #include "Plugin.hpp"
 #include "Parameters.hpp"
+#include "Visuals.hpp"
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -60,7 +61,7 @@ public:
 };
 class GeigerControl final : public juce::Component {
 public:
-    GeigerControl(GeigerPlugin& p,std::size_t index,std::function<void(const char*)> hover):plugin(p),id(index),onHover(std::move(hover)) {
+    GeigerControl(GeigerPlugin& p,std::size_t index,std::function<void(std::size_t)> hover):plugin(p),id(index),onHover(std::move(hover)) {
         const auto& d=geiger::definitions[id];
         setName(d.name); setTitle(d.name); setDescription(d.help); addMouseListener(this,true);
         if(d.choices[0]) {
@@ -78,7 +79,7 @@ public:
             slider.setNumDecimalPlacesToDisplay(2); slider.setMouseDragSensitivity(id==geiger::Rate ? 260 : 180);
             slider.textFromValueFunction=[this](double v){return valueText(id,v);};
             slider.valueFromTextFunction=[this](const juce::String& s){return s.trim().equalsIgnoreCase("off") ? geiger::definitions[id].minimum : s.getDoubleValue();};
-            slider.onDragStart=[this]{dragging=true; plugin.beginParameterGesture(geiger::parameterId(id));};
+            slider.onDragStart=[this]{onHover(id); dragging=true; plugin.beginParameterGesture(geiger::parameterId(id));};
             slider.onValueChange=[this]{if(dragging) plugin.setParameterFromGui(geiger::parameterId(id),slider.getValue()); else gesture(slider.getValue());};
             slider.onDragEnd=[this]{plugin.endParameterGesture(geiger::parameterId(id)); dragging=false;};
         }
@@ -98,6 +99,9 @@ public:
         if(id!=geiger::Output && id!=geiger::ClickModel) card(g,getLocalBounds().toFloat(),hero ? juce::Colour(0xff262435) : panel);
         g.setColour(hero ? amber : muted); g.setFont(font(hero ? 15 : 14,hero));
         g.drawText(geiger::definitions[id].name,10,5,getWidth()-20,24,juce::Justification::centred);
+        if(focused_ && !hero && id!=geiger::ClickModel && id!=geiger::Output) {
+            g.setColour(violet.withAlpha(0.85f)); g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(1),13,1.5f);
+        }
         if(hero) {g.setFont(font(12)); g.setColour(muted); g.drawText("INCOMING EVENTS / SECOND",5,getHeight()-22,getWidth()-10,17,juce::Justification::centred);}
     }
     void resized() override {
@@ -106,17 +110,18 @@ public:
         if(geiger::definitions[id].choices[0]) combo.setBounds(r.withSizeKeepingCentre(std::min(r.getWidth(),230),34));
         else slider.setBounds(r);
     }
-    void mouseEnter(const juce::MouseEvent&) override {onHover(geiger::definitions[id].help);}
+    void mouseEnter(const juce::MouseEvent&) override {onHover(id);}
     std::size_t parameter() const {return id;}
     bool editing() const {return dragging;}
+    void setFocused(bool focused) {if(focused_!=focused) {focused_=focused; repaint();}}
 private:
-    void gesture(double v) {const auto pid=geiger::parameterId(id); plugin.beginParameterGesture(pid); plugin.setParameterFromGui(pid,v); plugin.endParameterGesture(pid);}
+    void gesture(double v) {onHover(id); const auto pid=geiger::parameterId(id); plugin.beginParameterGesture(pid); plugin.setParameterFromGui(pid,v); plugin.endParameterGesture(pid);}
     GeigerPlugin& plugin;
     std::size_t id;
-    std::function<void(const char*)> onHover;
+    std::function<void(std::size_t)> onHover;
     juce::Slider slider;
     juce::ComboBox combo;
-    bool dragging=false;
+    bool dragging=false,focused_=false;
 };
 class GeigerMonitor final : public juce::Component {
 public:
@@ -162,69 +167,37 @@ public:
         const float dx=wave.getWidth()/128;
         g.setColour(violet.withAlpha(0.9f));
         for(std::uint32_t i=0;i<128;++i) {
-            const float p=t.scope[(head+i)%128].load(std::memory_order_relaxed);
-            const float h=std::min(18.0f,2.0f+40.0f*std::sqrt(std::max(p,0.0f)));
-            g.fillRect(wave.getX()+i*dx,wave.getCentreY()-h*0.5f,std::max(1.0f,dx-1),h);
+            const float low=t.scopeMin[(head+i)%128].load(std::memory_order_relaxed);
+            const float high=t.scopeMax[(head+i)%128].load(std::memory_order_relaxed);
+            if(high>low) g.drawLine(wave.getX()+i*dx,wave.getCentreY()-std::clamp(high*100,-10.0f,10.0f),wave.getX()+i*dx,wave.getCentreY()-std::clamp(low*100,-10.0f,10.0f),std::max(1.0f,dx-0.5f));
         }
     }
 private:
     GeigerPlugin& plugin; std::uint64_t previous=0; float flash=0,needle=0;
 };
-class GeigerExplorer final : public juce::Component {
-public:
-    explicit GeigerExplorer(GeigerPlugin& p):plugin(p) {setMouseCursor(juce::MouseCursor::CrosshairCursor); setTitle("Rate and listening-distance pad");}
-    ~GeigerExplorer() override {end();}
-    void paint(juce::Graphics& g) override {
-        card(g,getLocalBounds().toFloat());
-        g.setColour(violet); g.setFont(font(12,true)); g.drawText("PROBE PLAYGROUND",16,10,getWidth()-32,20,juce::Justification::left);
-        auto r=field();
-        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff151c2d),r.getX(),r.getBottom(),juce::Colour(0xff42334e),r.getRight(),r.getY(),false));
-        g.fillRoundedRectangle(r,7);
-        g.setColour(line.withAlpha(0.6f));
-        for(int i=1;i<6;++i) g.drawVerticalLine(static_cast<int>(r.getX()+r.getWidth()*i/6),r.getY(),r.getBottom());
-        for(int i=1;i<4;++i) g.drawHorizontalLine(static_cast<int>(r.getY()+r.getHeight()*i/4),r.getX(),r.getRight());
-        const auto x=static_cast<float>(std::log1p(plugin.parameters().value(geiger::parameterId(geiger::Rate)))/std::log(12001.0));
-        const auto y=static_cast<float>(plugin.parameters().value(geiger::parameterId(geiger::Distance))*0.01);
-        const auto pos=juce::Point<float>(r.getX()+x*r.getWidth(),r.getY()+y*r.getHeight());
-        g.setColour(amber.withAlpha(0.15f)); g.fillEllipse(pos.x-19,pos.y-19,38,38);
-        g.setColour(amber); g.drawEllipse(pos.x-10,pos.y-10,20,20,1.5f);
-        g.setColour(text); g.fillEllipse(pos.x-4,pos.y-4,8,8);
-        g.setFont(font(11)); g.setColour(muted);
-        g.drawText("QUIET",16,getHeight()-42,64,17,juce::Justification::left);
-        g.drawText("INTENSE",getWidth()-84,getHeight()-42,68,17,juce::Justification::right);
-        g.setFont(font(12)); g.drawText("Drag: rate / listening distance",10,getHeight()-23,getWidth()-20,17,juce::Justification::centred);
-    }
-    void mouseDown(const juce::MouseEvent& e) override {
-        active=true; plugin.beginParameterGesture(geiger::parameterId(geiger::Rate)); plugin.beginParameterGesture(geiger::parameterId(geiger::Distance)); move(e);
-    }
-    void mouseDrag(const juce::MouseEvent& e) override {move(e);}
-    void mouseUp(const juce::MouseEvent&) override {end();}
-private:
-    juce::Rectangle<float> field() const {return getLocalBounds().toFloat().withTrimmedTop(40).withTrimmedBottom(46).reduced(16,0);}
-    void end() {if(active) {plugin.endParameterGesture(geiger::parameterId(geiger::Rate)); plugin.endParameterGesture(geiger::parameterId(geiger::Distance)); active=false;}}
-    void move(const juce::MouseEvent& e) {
-        const auto r=field(); if(r.getWidth()<=0 || r.getHeight()<=0) return;
-        const double x=std::clamp((e.position.x-r.getX())/r.getWidth(),0.0f,1.0f);
-        const double y=std::clamp((e.position.y-r.getY())/r.getHeight(),0.0f,1.0f);
-        plugin.setParameterFromGui(geiger::parameterId(geiger::Rate),std::expm1(x*std::log(12001.0)));
-        plugin.setParameterFromGui(geiger::parameterId(geiger::Distance),100*y); repaint();
-    }
-    GeigerPlugin& plugin; bool active=false;
-};
 GeigerEditor::GeigerEditor(GeigerPlugin& p):plugin_(p),look_(std::make_unique<GeigerLook>()) {
     setLookAndFeel(look_.get()); setOpaque(true); setTitle("Geiger Generator");
     for(std::size_t i=0;i<geiger::Count;++i) {
         if(i==geiger::Power) continue;
-        auto c=std::make_unique<GeigerControl>(p,i,[this](const char* s){help(s);}); addAndMakeVisible(*c); controls_.push_back(std::move(c));
+        auto c=std::make_unique<GeigerControl>(p,i,[this](std::size_t index){focusParameter(index);}); addAndMakeVisible(*c); controls_.push_back(std::move(c));
     }
-    monitor_=std::make_unique<GeigerMonitor>(p); explorer_=std::make_unique<GeigerExplorer>(p);
+    monitor_=std::make_unique<GeigerMonitor>(p); explorer_=std::make_unique<GeigerVisuals>(p);
     addAndMakeVisible(*monitor_); addAndMakeVisible(*explorer_);
     const char* names[]{"01  FIELD","02  CIRCUIT","03  SPEAKER","04  BEHAVIOR"};
     for(int i=0;i<4;++i) {auto& b=tabs_[i]; b.setButtonText(names[i]); b.onClick=[this,i]{selectPage(i);}; addAndMakeVisible(b);}
     for(auto* b:{&power_,&test_,&seed_,&panic_}) addAndMakeVisible(*b);
-    addAndMakeVisible(presets_); presets_.setTextWhenNothingSelected("Factory presets"); presets_.setTitle("Factory presets");
+    addAndMakeVisible(presets_); presets_.setTextWhenNothingSelected("Custom sound"); presets_.setTitle("Current preset");
     for(std::size_t i=0;i<geiger::presetNames.size();++i) presets_.addItem(geiger::presetNames[i],static_cast<int>(i)+1);
-    presets_.onChange=[this]{if(presets_.getSelectedId()>0) plugin_.applyPreset(static_cast<std::size_t>(presets_.getSelectedId()-1)); presets_.setSelectedId(0,juce::dontSendNotification);};
+    presets_.onChange=[this]{if(presets_.getSelectedId()>0) {plugin_.applyPreset(static_cast<std::size_t>(presets_.getSelectedId()-1)); refreshDisplay();}};
+    addAndMakeVisible(previousPreset_); addAndMakeVisible(nextPreset_);
+    previousPreset_.setTitle("Previous factory preset"); nextPreset_.setTitle("Next factory preset");
+    previousPreset_.setTooltip("Previous preset. Keeps output, power, run mode and seed.");
+    nextPreset_.setTooltip("Next preset. Keeps output, power, run mode and seed.");
+    const auto stepPreset=[this](int step) {
+        const int count=static_cast<int>(geiger::presetNames.size());
+        plugin_.applyPreset(static_cast<std::size_t>((std::max(0,plugin_.presetIndex())+step+count)%count)); refreshDisplay();
+    };
+    previousPreset_.onClick=[stepPreset]{stepPreset(-1);}; nextPreset_.onClick=[stepPreset]{stepPreset(1);};
     power_.setClickingTogglesState(true); power_.onClick=[this]{auto id=geiger::parameterId(geiger::Power); plugin_.beginParameterGesture(id); plugin_.setParameterFromGui(id,power_.getToggleState()?1:0); plugin_.endParameterGesture(id);};
     power_.setTooltip(geiger::definitions[geiger::Power].help);
     test_.onClick=[this]{plugin_.testClick();}; test_.setTooltip("Audition one pulse through the current circuit, even when Transport or MIDI gate is closed. Power must be on.");
@@ -233,7 +206,7 @@ GeigerEditor::GeigerEditor(GeigerPlugin& p):plugin_(p),look_(std::make_unique<Ge
     addAndMakeVisible(calm_); calm_.setTooltip("Disable detection glow while keeping the count readout and useful meters.");
     addAndMakeVisible(help_); help_.setFont(font(13)); help_.setColour(juce::Label::textColourId,muted); help_.setJustificationType(juce::Justification::centredLeft);
     help("Turn Intensity for density. Choose a click model for character. Double-click a knob to reset; type a value for precision.");
-    setSize(1120,760); selectPage(0); startTimerHz(30);
+    setSize(1120,760); selectPage(0); refreshDisplay(); startTimerHz(30);
 }
 GeigerEditor::~GeigerEditor() {stopTimer(); controls_.clear(); explorer_.reset(); monitor_.reset(); setLookAndFeel(nullptr);}
 void GeigerEditor::help(const char* s) {help_.setText(s,juce::dontSendNotification);}
@@ -241,17 +214,42 @@ void GeigerEditor::selectPage(int page) {
     page_=juce::jlimit(0,3,page);
     for(auto& c:controls_) c->setVisible(geiger::definitions[c->parameter()].page<0 || geiger::definitions[c->parameter()].page==page_);
     for(int i=0;i<4;++i) tabs_[i].setToggleState(i==page_,juce::dontSendNotification);
+    if(explorer_) explorer_->setPage(page_);
+    constexpr geiger::Param initial[]{geiger::Rate,geiger::PulseWidth,geiger::Speaker,geiger::Attack};
+    focusParameter(initial[page_]);
     resized(); repaint();
+}
+void GeigerEditor::focusParameter(std::size_t index) {
+    if(index>=geiger::Count) return;
+    focused_=index;
+    for(auto& c:controls_) c->setFocused(c->parameter()==index);
+    help(geiger::definitions[index].help);
+    if(explorer_) explorer_->focus(index);
+}
+void GeigerEditor::refreshDisplay() {
+    power_.setToggleState(plugin_.parameters().value(geiger::parameterId(geiger::Power))>0.5,juce::dontSendNotification);
+    for(auto& c:controls_) if(c->isVisible()) c->refresh();
+    const juce::String name(plugin_.presetName());
+    if(!presets_.isPopupActive() && presets_.getText()!=name) {
+        presets_.setSelectedId(plugin_.presetIsModified() ? 0 : plugin_.presetIndex()+1,juce::dontSendNotification);
+        presets_.setText(name,juce::dontSendNotification);
+    }
+    const int index=plugin_.presetIndex();
+    presets_.setTooltip(index<0 ? "Custom sound. Choose a factory starting point." : juce::String(geiger::presetDescriptions[static_cast<std::size_t>(index)])+"  * = edited; output, power, mode and seed are preserved.");
+    if(explorer_) explorer_->refresh();
 }
 void GeigerEditor::timerCallback() {
     for(auto& c:controls_) if(c->isVisible()) c->refresh();
     power_.setToggleState(plugin_.parameters().value(geiger::parameterId(geiger::Power))>0.5,juce::dontSendNotification);
-    monitor_->tick(calm_.getToggleState()); explorer_->repaint();
+    monitor_->tick(calm_.getToggleState());
+    if(++previewTicks_>=3) {previewTicks_=0; refreshDisplay();}
 }
 void GeigerEditor::paint(juce::Graphics& g) {
     g.fillAll(background);
-    g.setColour(amber); g.setFont(font(30,true)); g.drawText("GEIGER",24,13,200,37,juce::Justification::left);
-    g.setColour(muted); g.setFont(font(11,true)); g.drawText("GENERATOR  /  NULL AUDIO",25,48,230,21,juce::Justification::left);
+    g.setColour(amber); g.setFont(font(30,true)); g.drawText("GEIGER",24,13,160,37,juce::Justification::left);
+    g.setColour(muted); g.setFont(font(11,true)); g.drawText("GENERATOR  1.0  /  NULL",25,48,165,21,juce::Justification::left);
+    g.setColour(muted); g.setFont(font(14));
+    g.drawText("Preset",presets_.getX(),6,presets_.getWidth(),24,juce::Justification::centred);
     g.setColour(line); g.drawHorizontalLine(getHeight()-60,24.0f,static_cast<float>(getWidth()-24));
     g.setFont(font(11)); g.setColour(muted.withAlpha(0.8f));
     g.drawText("SYNTHETIC COUNTS. REAL CHARACTER.   /   SOUND DESIGN ONLY",24,getHeight()-25,getWidth()-48,18,juce::Justification::left);
@@ -263,18 +261,20 @@ void GeigerEditor::paint(juce::Graphics& g) {
 }
 void GeigerEditor::resized() {
     const int w=getWidth(),h=getHeight();
-    const int headerLeft=std::max(218,w/5),powerWidth=82,outputWidth=145;
+    const int headerLeft=194,powerWidth=72,outputWidth=122;
     power_.setBounds(w-24-powerWidth,26,powerWidth,36);
     const int outputX=w-24-powerWidth-12-outputWidth;
     const int middle=outputX-headerLeft-20;
-    const int modelWidth=middle/2;
+    const int modelWidth=middle*37/100;
     for(auto& c:controls_) {
         if(c->parameter()==geiger::Output) c->setBounds(outputX,4,outputWidth,73);
         if(c->parameter()==geiger::ClickModel) c->setBounds(headerLeft,2,modelWidth,76);
     }
-    presets_.setBounds(headerLeft+modelWidth+12,32,middle-modelWidth-12,33);
+    const int presetX=headerLeft+modelWidth+12,presetW=middle-modelWidth-12;
+    previousPreset_.setBounds(presetX,32,32,33); nextPreset_.setBounds(presetX+presetW-32,32,32,33);
+    presets_.setBounds(presetX+36,32,presetW-72,33);
     const int top=88,displayH=std::clamp(h/3-35,170,230),inner=w-48;
-    const int heroW=std::max(174,inner/5),explorerW=std::max(240,inner*29/100),monitorW=inner-heroW-explorerW-24;
+    const int heroW=std::max(174,inner/5),explorerW=std::max(320,inner*40/100),monitorW=inner-heroW-explorerW-24;
     for(auto& c:controls_) if(c->parameter()==geiger::Rate) c->setBounds(24,top,heroW,displayH);
     monitor_->setBounds(24+heroW+12,top,monitorW,displayH);
     explorer_->setBounds(w-24-explorerW,top,explorerW,displayH);
@@ -295,5 +295,13 @@ void GeigerEditor::resized() {
 bool GeigerEditor::layoutIsValid() const {
     for(const auto& c:controls_) if(c->isVisible() && !getLocalBounds().contains(c->getBounds())) return false;
     for(const auto& b:tabs_) if(!getLocalBounds().contains(b.getBounds())) return false;
-    return getLocalBounds().contains(monitor_->getBounds()) && getLocalBounds().contains(explorer_->getBounds());
+    std::vector<const juce::Component*> items;
+    for(const auto& c:controls_) if(c->isVisible()) items.push_back(c.get());
+    for(const auto& b:tabs_) items.push_back(&b);
+    for(const auto* c:std::initializer_list<const juce::Component*>{monitor_.get(),explorer_.get(),&presets_,&previousPreset_,&nextPreset_,&power_,&test_,&seed_,&panic_,&calm_}) items.push_back(c);
+    for(std::size_t i=0;i<items.size();++i) {
+        if(!getLocalBounds().contains(items[i]->getBounds()) || items[i]->getWidth()<=0 || items[i]->getHeight()<=0) return false;
+        for(std::size_t j=i+1;j<items.size();++j) if(items[i]->getBounds().intersects(items[j]->getBounds())) return false;
+    }
+    return explorer_->dataIsFinite();
 }

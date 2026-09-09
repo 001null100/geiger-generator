@@ -6,3 +6,8 @@ dist/
 *.wav
 *.o
 .DS_Store
+package/
+release/
+artifacts/
+release-notes.md
+__pycache__/

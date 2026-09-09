@@ -10,7 +10,7 @@
 const clap_plugin_descriptor_t& GeigerPlugin::descriptor() noexcept {
     static const char* const features[]{CLAP_PLUGIN_FEATURE_INSTRUMENT,CLAP_PLUGIN_FEATURE_SYNTHESIZER,CLAP_PLUGIN_FEATURE_STEREO,nullptr};
     static const clap_plugin_descriptor_t d{CLAP_VERSION,"dev.nullexo.geiger-generator","Geiger Generator","Null Exo",
-        "https://github.com/001null100/geiger-generator","","","0.1.0",
+        "https://github.com/001null100/geiger-generator","","","1.0.0",
         "A radiation-inspired stochastic click instrument: detector, circuit and transducer.",features};
     return d;
 }
@@ -56,13 +56,18 @@ geiger::Values GeigerPlugin::readValues() const noexcept {
     geiger::Values v{}; for(std::size_t i=0;i<geiger::Count;++i) v[i]=parameters().effectiveValue(geiger::parameterId(i)); return v;
 }
 bool GeigerPlugin::onActivate(double sr,std::uint32_t,std::uint32_t) noexcept {
+    scopeStride_=static_cast<std::uint32_t>(std::max(1.0,sr/750.0));
+    meterDecay_=static_cast<float>(std::exp(-1.0/(std::max(1.0,sr)*0.08)));
     engine_.configure(readValues()); const bool ok=engine_.prepare(sr); onReset(); return ok;
 }
 void GeigerPlugin::onReset() noexcept {
     engine_.reset(); notes_={}; sustain_={}; noteOrder_=0; playing_=false; restartTransport_=false; blockTransportReady_=false;
-    scopePeak_=meterPeak_=0; scopeSamples_=scopeHead_=0;
+    scopePeak_=meterPeak_=scopeMin_=scopeMax_=leftPeak_=rightPeak_=0; scopeSamples_=scopeHead_=0;
     requestedClicks_.store(0,std::memory_order_relaxed);
     telemetry_.cps=0; telemetry_.incoming=0; telemetry_.peak=0; telemetry_.detected=0; telemetry_.missed=0; telemetry_.running=false;
+    telemetry_.balance=1; telemetry_.leftPeak=0; telemetry_.rightPeak=0;
+    for(auto& x:telemetry_.scopeMin) x.store(0,std::memory_order_relaxed);
+    for(auto& x:telemetry_.scopeMax) x.store(0,std::memory_order_relaxed);
     for(auto& x:telemetry_.scope) x.store(0,std::memory_order_relaxed);
     telemetry_.scopeHead.store(0,std::memory_order_release);
 }
@@ -83,9 +88,48 @@ void GeigerPlugin::applyPreset(std::size_t index) noexcept {
     const auto v=geiger::preset(index);
     for(std::size_t i=0;i<geiger::Count;++i) {
         // Presets must not raise the user's level, change gating, or unexpectedly power on.
-        if(i==geiger::Output || i==geiger::Power || i==geiger::RunMode || i==geiger::Seed) continue;
+        if(geiger::presetProtected(i)) continue;
         const auto id=geiger::parameterId(i); beginParameterGesture(id); setParameterFromGui(id,v[i]); endParameterGesture(id);
     }
+    presetIndex_.store(static_cast<int>(index),std::memory_order_relaxed);
+    markStateDirty();
+}
+geiger::Values GeigerPlugin::currentValues() const noexcept {
+    geiger::Values v{};
+    for(std::size_t i=0;i<geiger::Count;++i) v[i]=parameters().value(geiger::parameterId(i));
+    return v;
+}
+int GeigerPlugin::presetIndex() const noexcept {
+    const auto v=currentValues();
+    const int anchor=presetIndex_.load(std::memory_order_relaxed);
+    if(anchor>=0 && geiger::matchesPreset(v,static_cast<std::size_t>(anchor))) return anchor;
+    const int match=geiger::matchingPreset(v);
+    return match>=0 ? match : anchor;
+}
+bool GeigerPlugin::presetIsModified() const noexcept {
+    const int index=presetIndex();
+    return index<0 || !geiger::matchesPreset(currentValues(),static_cast<std::size_t>(index));
+}
+std::string GeigerPlugin::presetName() const {
+    const int index=presetIndex();
+    if(index<0) return "Custom sound";
+    return std::string(geiger::presetNames[static_cast<std::size_t>(index)])+(presetIsModified() ? " *" : "");
+}
+std::vector<std::byte> GeigerPlugin::saveExtraState() const {
+    const auto index=static_cast<std::uint32_t>(presetIndex()+1);
+    std::vector<std::byte> bytes{std::byte{'G'},std::byte{'G'},std::byte{'P'},std::byte{1}};
+    for(int shift=0;shift<32;shift+=8) bytes.push_back(static_cast<std::byte>((index>>shift)&255));
+    return bytes;
+}
+bool GeigerPlugin::loadExtraState(std::span<const std::byte> bytes) {
+    if(bytes.empty()) { // Preview 0.1 project: infer the name from its controls.
+        presetIndex_.store(geiger::matchingPreset(currentValues()),std::memory_order_relaxed); return true;
+    }
+    if(bytes.size()!=8 || bytes[0]!=std::byte{'G'} || bytes[1]!=std::byte{'G'} || bytes[2]!=std::byte{'P'} || bytes[3]!=std::byte{1}) return false;
+    std::uint32_t index=0;
+    for(int i=0;i<4;++i) index|=static_cast<std::uint32_t>(bytes[4+i])<<(i*8);
+    if(index>geiger::presetNames.size()) return false;
+    presetIndex_.store(static_cast<int>(index)-1,std::memory_order_relaxed); return true;
 }
 void GeigerPlugin::initialiseBlockTransport() noexcept {
     // The block snapshot precedes sample-offset events, including events at zero.
@@ -159,15 +203,21 @@ void GeigerPlugin::processAudio(const clap_process_t& process,std::uint32_t star
             if(output->data64 && output->data64[ch]) output->data64[ch][frame]=sample;
         }
         const auto peak=std::max(std::abs(f.left),std::abs(f.right));
-        scopePeak_=std::max(scopePeak_,peak); meterPeak_=std::max(peak,meterPeak_*0.9997f);
-        if(++scopeSamples_>=64) {
+        scopePeak_=std::max(scopePeak_,peak); meterPeak_=std::max(peak,meterPeak_*meterDecay_);
+        leftPeak_=std::max(std::abs(f.left),leftPeak_*meterDecay_); rightPeak_=std::max(std::abs(f.right),rightPeak_*meterDecay_);
+        scopeMin_=std::min(scopeMin_,std::min(f.left,f.right)); scopeMax_=std::max(scopeMax_,std::max(f.left,f.right));
+        if(++scopeSamples_>=scopeStride_) {
             telemetry_.scope[scopeHead_%128].store(scopePeak_,std::memory_order_relaxed);
+            telemetry_.scopeMin[scopeHead_%128].store(scopeMin_,std::memory_order_relaxed);
+            telemetry_.scopeMax[scopeHead_%128].store(scopeMax_,std::memory_order_relaxed);
             ++scopeHead_; telemetry_.scopeHead.store(scopeHead_,std::memory_order_release);
-            scopeSamples_=0; scopePeak_=0;
+            scopeSamples_=0; scopePeak_=scopeMin_=scopeMax_=0;
         }
     }
     telemetry_.cps.store(static_cast<float>(engine_.measuredCps()),std::memory_order_relaxed);
     telemetry_.incoming.store(static_cast<float>(engine_.incomingCps()),std::memory_order_relaxed);
+    telemetry_.balance.store(static_cast<float>(engine_.balanceGain()),std::memory_order_relaxed);
+    telemetry_.leftPeak.store(leftPeak_,std::memory_order_relaxed); telemetry_.rightPeak.store(rightPeak_,std::memory_order_relaxed);
     telemetry_.peak.store(meterPeak_,std::memory_order_relaxed);
     telemetry_.detected.store(engine_.detected(),std::memory_order_relaxed);
     telemetry_.missed.store(engine_.missed(),std::memory_order_relaxed);

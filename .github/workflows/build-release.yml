@@ -27,8 +27,14 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
       - name: Build
         run: cmake --build build --config Release --parallel 2
-      - name: DSP and host regression tests
+      - name: DSP, allocation and host regression tests
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Sanitized DSP regression (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S . -B build-sanitized -DGEIGER_BUILD_PLUGIN=OFF -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build build-sanitized --parallel 2
+          ctest --test-dir build-sanitized --output-on-failure
       - name: UI smoke images (Linux)
         if: runner.os == 'Linux'
         run: xvfb-run -a ./build/GeigerUiSmoke "$PWD/ui-smoke"
@@ -92,24 +98,7 @@ jobs:
         with:
           pattern: GeigerGenerator-*
           path: artifacts
-      - name: Publish verified preview build
+      - name: Publish verified stable release
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir release
-          cp artifacts/GeigerGenerator-Windows/*.zip release/
-          cp artifacts/GeigerGenerator-Linux/*.zip release/
-          cp artifacts/GeigerGenerator-UI-Windows/geiger-1120-page-1.png release/GeigerGenerator-UI.png
-          (cd release && sha256sum *.zip > SHA256SUMS.txt)
-          cat > notes.md <<NOTES
-          Geiger Generator 0.1.0 preview, source commit $GITHUB_SHA.
-
-          Windows x64 and Linux x86_64 CLAP builds. Both platforms passed DSP tests, actual plug-in host/state tests, editor rendering checks and clap-validator before publication. Manual Bitwig testing is still required; see docs/TESTING.md.
-
-          37 parameters, six click models, five transducers, nine presets. Random detector arrivals, non-extendable dead time and recovery feed a synthesized pulse/case response. This is a sound instrument, not a dosimeter.
-
-          Download the Windows or Linux CLAP ZIP, extract GeigerGenerator.clap into your host's CLAP folder, and rescan. Audio demo WAVs and an actual UI screenshot are attached separately.
-          NOTES
-          gh release create "v0.1.0-preview.${{ github.run_number }}" release/* --prerelease --target "$GITHUB_SHA" --title "Geiger Generator 0.1.0 preview ${{ github.run_number }}" --notes-file notes.md
+        run: python3 tools/Publish.py

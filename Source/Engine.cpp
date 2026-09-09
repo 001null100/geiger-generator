@@ -13,9 +13,7 @@ float audioSample(double v) noexcept {
     // Flush at the output boundary without relying on a host's CPU FTZ mode.
     return std::abs(v)<std::numeric_limits<float>::min() ? 0.0f : static_cast<float>(v);
 }
-struct Model { double f1,f2,pulse,ring,noise; };
-constexpr Model models[]={{2100,4300,0.8,0.42,0.12},{3600,6700,0.35,0.9,0.05},
-    {950,2300,1.0,0.50,0.2},{650,3100,1.1,0.75,0.28},{1250,2800,0.4,0.28,0.18},{2800,7210,0.18,1.05,0.03}};
+
 }
 Engine::Engine() noexcept { prepare(48000); }
 bool Engine::prepare(double sr) noexcept {
@@ -33,15 +31,16 @@ void Engine::configure(Values v) noexcept {
 }
 void Engine::reseed() noexcept {
     const auto s=static_cast<std::uint64_t>(values_[Seed]);
-    timing_.seed(s); color_.seed(s^0xa45b83ULL); field_.seed(s^0x382ae5ULL); noise_.seed(s^0xf41237ULL);
+    timing_.seed(s); color_.seed(s^0xa45b83ULL); field_.seed(s^0x382ae5ULL); noise_.seed(s^0xf41237ULL); stereoNoise_.seed(s^0x27b19dULL);
     hazard_=nextHazard();
     afterTimes_.fill(std::numeric_limits<double>::infinity());
     wander_=wanderTarget_=wanderLeft_=cluster_=motionPhase_=0;
 }
 void Engine::reset() noexcept {
-    channels_={}; pending_={}; modalPending_={};
+    channels_={}; pending_={}; modalPending_={}; energyPending_={}; nextPending_={}; nextModal_={}; nextEnergy_={};
     time_=readyAt_=0; lastAccepted_=-1e9;
     gate_=0; measured_=incoming_=pendingMeter_=0; accepted_=missed_=0; maintenance_=0; humPhase_=0;
+    drive_=driveTarget_; balance_=1;
     outputGain_=gainTarget_; powerGain_=values_[Power]; hissGain_=humGain_=0; distanceGain_=distanceTarget_;
     reseed();
 }
@@ -53,7 +52,7 @@ void Engine::setGate(bool open,double velocity,double semitones) noexcept {
 }
 void Engine::updateCoefficients() noexcept {
     const auto& v=values_;
-    const auto m=models[static_cast<int>(v[ClickModel])];
+    const auto m=clickProfiles[static_cast<int>(v[ClickModel])];
     const double ratio=std::exp2((v[Pitch]+midiPitch_)/12.0);
     const double f1=std::min(sr_*0.4,m.f1*ratio),f2=std::min(sr_*0.43,m.f2*ratio);
     fastA_=std::exp(-1.0/(sr_*v[PulseWidth]*0.001));
@@ -62,20 +61,18 @@ void Engine::updateCoefficients() noexcept {
     r1_=std::exp(-1.0/(sr_*v[Decay]*0.001)); r2_=std::exp(-1.0/(sr_*v[Decay]*0.00053));
     c1_=std::cos(2*pi*f1/sr_); s1_=std::sin(2*pi*f1/sr_);
     c2_=std::cos(2*pi*f2/sr_); s2_=std::sin(2*pi*f2/sr_);
-    constexpr double bandwidth[]={18000,8500,10500,6500,4100};
-    constexpr double lowcut[]={20,220,850,120,450};
-    constexpr double boxFreq[]={800,1350,3100,720,1850};
-    const auto sp=static_cast<int>(v[Speaker]);
-    const double cutoff=std::clamp(std::min(v[Tone],bandwidth[sp])*std::exp2(-2.0*v[Distance]/100.0),80.0,sr_*0.42);
-    lpA_=std::exp(-2*pi*cutoff/sr_); hpA_=std::exp(-2*pi*std::min(lowcut[sp],sr_*0.1)/sr_);
-    const double bf=std::min(boxFreq[sp],sr_*0.35);
-    boxR_=std::exp(-1.0/(sr_*0.0015)); boxC_=std::cos(2*pi*bf/sr_); boxS_=std::sin(2*pi*bf/sr_);
+    const auto speaker=speakerProfiles[static_cast<int>(v[Speaker])];
+    const double cutoff=std::clamp(std::min(v[Tone],speaker.bandwidth)*std::exp2(-2.0*v[Distance]/100.0),80.0,sr_*0.42);
+    lpA_=std::exp(-2*pi*cutoff/sr_); hpA_=std::exp(-2*pi*std::min(speaker.lowcut,sr_*0.1)/sr_);
+    const double bf=std::min(speaker.frequency,sr_*0.35);
+    boxR_=std::exp(-1.0/(sr_*speaker.decayMs*0.001)); boxC_=std::cos(2*pi*bf/sr_); boxS_=std::sin(2*pi*bf/sr_);
+    balanceA_=std::exp(-1.0/(sr_*0.035));
     smoothA_=std::exp(-1.0/(sr_*0.012)); meterA_=std::exp(-1.0/(sr_*0.75));
     gateAttack_=v[Attack]<=0 ? 0 : std::exp(-1.0/(sr_*v[Attack]*0.001));
     gateRelease_=std::exp(-1.0/(sr_*v[Release]*0.001));
     wanderA_=std::exp(-2*pi*v[WanderSpeed]/sr_); clusterA_=std::exp(-1.0/(sr_*0.065));
     pulseMix_=m.pulse; ringMix_=m.ring; noiseMix_=m.noise;
-    gainTarget_=db(v[Output]); drive_=db(v[Drive]);
+    gainTarget_=db(v[Output]); driveTarget_=db(v[Drive]);
     dcA_=std::exp(-2*pi*12/sr_);
     hissTarget_=v[Hiss]<=-89.9 ? 0 : db(v[Hiss]); humTarget_=v[Hum]<=-89.9 ? 0 : db(v[Hum]);
     distanceTarget_=std::exp2(-2.5*v[Distance]*0.01);
@@ -84,15 +81,24 @@ double Engine::nextHazard() noexcept {
     const double random=values_[Randomness]*0.01;
     return std::max(1e-9,(1.0-random)+random*(-std::log(timing_.uniform())));
 }
-void Engine::excite(double amplitude) noexcept {
+void Engine::excite(double amplitude,double fraction) noexcept {
     // Equal mono amplitude at zero width; constant-power panning for scattered clicks.
     const double pan=color_.bipolar()*values_[Width]*0.01;
     const double variant=color_.bipolar()*values_[Variation]*0.01;
     amplitude*=1.0+0.4*variant;
     const double l=std::sqrt(1.0-pan),r=std::sqrt(1.0+pan);
-    pending_[0]+=amplitude*l; pending_[1]+=amplitude*r;
-    modalPending_[0]+=amplitude*l*(1.0+0.35*variant);
-    modalPending_[1]+=amplitude*r*(1.0+0.35*variant);
+    // A bounded two-tap fractional delay preserves sub-sample arrival timing
+    // in the acoustic excitation. No extra random draws or detector changes.
+    fraction=std::clamp(fraction,0.0,1.0);
+    const double gains[]{l,r};
+    for(std::size_t ch=0;ch<2;++ch) {
+        const double a=amplitude*gains[ch], modal=a*(1.0+0.35*variant);
+        pending_[ch]+=a*(1-fraction); nextPending_[ch]+=a*fraction;
+        modalPending_[ch]+=modal*(1-fraction); nextModal_[ch]+=modal*fraction;
+        // Independent burst energies add, not their correlated noise envelopes.
+        energyPending_[ch]+=a*a*(1-fraction); nextEnergy_[ch]+=a*a*fraction;
+    }
+
 }
 bool Engine::detect(double time,bool secondary) noexcept {
     if (time<readyAt_) { ++missed_; return false; }
@@ -101,7 +107,7 @@ bool Engine::detect(double time,bool secondary) noexcept {
     const double strength=(lastAccepted_<0 || recovery<=0) ? 1.0 : 0.25+0.75*(-std::expm1(-gap/recovery));
     readyAt_=time+values_[DeadTime]*1e-6; lastAccepted_=time;
     ++accepted_; pendingMeter_+=1.0;
-    excite(strength*(secondary ? 0.65 : 1.0));
+    excite(strength*(secondary ? 0.65 : 1.0),(time-time_)*sr_);
     // Secondary discharge timing is independent of the primary arrival RNG.
     if (!secondary && field_.uniform()<values_[Afterpulse]*0.01) {
         for (auto& at:afterTimes_) if (!std::isfinite(at)) {
@@ -111,15 +117,15 @@ bool Engine::detect(double time,bool secondary) noexcept {
     return true;
 }
 void Engine::testClick() noexcept { if (values_[Power]>0.5) excite(1.0); }
-double Engine::render(Channel& ch,double injection,double variation,double n,double hum) noexcept {
+double Engine::render(Channel& ch,double injection,double variation,double noiseEnergy,double n,double hum) noexcept {
     ch.fast+=injection; ch.slow+=injection;
-    ch.x1+=variation; ch.x2+=injection; ch.noise=std::min(ch.noise+injection,12.0);
+    ch.x1+=variation; ch.x2+=injection; ch.noise=std::min(ch.noise+noiseEnergy,144.0);
     const double edge=values_[Sharpness]*0.01;
     const double pulse=pulseMix_*(ch.fast-(0.18+0.5*edge)*ch.slow);
     const double ring=ringMix_*(0.72*ch.x1+0.28*ch.x2)*values_[Body]*0.01;
-    double x=0.22*((0.3+0.7*edge)*pulse+ring+(noiseMix_+0.8)*values_[Noise]*0.01*ch.noise*n);
+    double x=0.22*((0.3+0.7*edge)*pulse+ring+(noiseMix_+0.8)*values_[Noise]*0.01*std::sqrt(ch.noise)*n);
     x+=gate_*(hissGain_*n+humGain_*hum);
-    ch.fast*=fastA_; ch.slow*=slowA_; ch.noise*=noiseA_;
+    ch.fast*=fastA_; ch.slow*=slowA_; ch.noise*=noiseA_*noiseA_;
     const double x1=ch.x1,x2=ch.x2;
     ch.x1=r1_*(c1_*x1-s1_*ch.y1); ch.y1=r1_*(s1_*x1+c1_*ch.y1);
     ch.x2=r2_*(c2_*x2-s2_*ch.y2); ch.y2=r2_*(s2_*x2+c2_*ch.y2);
@@ -129,12 +135,15 @@ double Engine::render(Channel& ch,double injection,double variation,double n,dou
     ch.boxX=boxR_*(boxC_*bx-boxS_*ch.boxY)+(1-boxR_)*ch.lp2;
     ch.boxY=boxR_*(boxS_*bx+boxC_*ch.boxY);
     x=ch.lp2+ch.boxX*values_[Resonance]*0.05;
-    x=std::tanh(x*drive_)/std::sqrt(drive_);
+    // Balance before the nonlinear stage, so dense fields retain articulation.
+    const double driven=x*balance_*drive_;
+    x=antialiasedClip(driven,ch.driveIn)/std::sqrt(drive_); ch.driveIn=driven;
     // Remove any saturation-induced DC before the final bounded safety stage.
     const double y=x-ch.outIn+dcA_*ch.outDc;
     ch.outIn=x; ch.outDc=y;
-    const double comp=1.0/std::sqrt(1.0+incoming_*0.005*values_[Compensation]*0.01);
-    return 0.97*std::tanh(y/0.97)*outputGain_*powerGain_*comp*distanceGain_;
+    const double protectedOutput=0.97*antialiasedClip(y/0.97,ch.safetyIn);
+    ch.safetyIn=y/0.97;
+    return protectedOutput*outputGain_*powerGain_*distanceGain_;
 }
 Frame Engine::tick() noexcept {
     const auto& v=values_;
@@ -142,6 +151,7 @@ Frame Engine::tick() noexcept {
     const double ga=target>gate_ ? gateAttack_ : gateRelease_;
     gate_=target+(gate_-target)*ga;
     if (gate_<1e-8) gate_=0;
+    drive_=driveTarget_+(drive_-driveTarget_)*smoothA_;
     outputGain_=gainTarget_+(outputGain_-gainTarget_)*smoothA_;
     powerGain_=v[Power]+(powerGain_-v[Power])*smoothA_;
     hissGain_=hissTarget_+(hissGain_-hissTarget_)*smoothA_; humGain_=humTarget_+(humGain_-humTarget_)*smoothA_;
@@ -180,13 +190,20 @@ Frame Engine::tick() noexcept {
     hazard_-=std::max(0.0,perSample-consumed);
     if(hazard_<=0) hazard_=nextHazard();
     measured_=meterA_*measured_+(1-meterA_)*pendingMeter_*sr_; pendingMeter_=0;
+    // The actual accepted count-rate meter follows tube losses, secondary
+    // discharges and gate release; smoothing prevents blockwise gain jumps.
+    const double desiredBalance=densityGain(measured_,v[Compensation]);
+    balance_=desiredBalance+(balance_-desiredBalance)*balanceA_;
     const double n=noise_.bipolar();
+    const double width=v[Width]*0.01;
+    const double nr=std::sqrt(1-width)*n+std::sqrt(width)*stereoNoise_.bipolar();
     humPhase_+=2*pi*(v[HumFrequency]<0.5 ? 50.0 : 60.0)/sr_; if (humPhase_>=2*pi) humPhase_-=2*pi;
     const double hum=humGain_<1e-12 ? 0.0 : std::sin(humPhase_)+0.15*std::sin(2*humPhase_);
     Frame result;
-    result.left=audioSample(render(channels_[0],pending_[0],modalPending_[0],n,hum));
-    result.right=audioSample(render(channels_[1],pending_[1],modalPending_[1],n,hum));
-    pending_={}; modalPending_={}; time_+=1/sr_;
+    result.left=audioSample(render(channels_[0],pending_[0],modalPending_[0],energyPending_[0],n,hum));
+    result.right=audioSample(render(channels_[1],pending_[1],modalPending_[1],energyPending_[1],nr,hum));
+    pending_=nextPending_; modalPending_=nextModal_; energyPending_=nextEnergy_;
+    nextPending_={}; nextModal_={}; nextEnergy_={}; time_+=1/sr_;
     if ((++maintenance_&255u)==0) {
         powerGain_=clean(powerGain_); hissGain_=clean(hissGain_); humGain_=clean(humGain_);
         measured_=clean(measured_); cluster_=clean(cluster_);
@@ -195,6 +212,7 @@ Frame Engine::tick() noexcept {
             c.x2=clean(c.x2); c.y2=clean(c.y2); c.noise=clean(c.noise); c.dcIn=clean(c.dcIn);
             c.dcOut=clean(c.dcOut); c.lp1=clean(c.lp1); c.lp2=clean(c.lp2); c.boxX=clean(c.boxX);
             c.boxY=clean(c.boxY); c.outIn=clean(c.outIn); c.outDc=clean(c.outDc);
+            c.driveIn=clean(c.driveIn); c.safetyIn=clean(c.safetyIn);
         }
     }
     return result;

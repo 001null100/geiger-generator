@@ -95,6 +95,27 @@ int main() {
             plugin->stop_processing(plugin); plugin->deactivate(plugin);
         }
         std::cout<<"PASS actual CLAP reactivation from 1 to 768 kHz, including fractional rates\n";
+        // Preset provenance is retained through edits and state round trips.
+        instance->applyPreset(12); params->flush(plugin,&empty.input,nullptr);
+        require(instance->presetName()=="Wire constellation","Preset name not retained");
+        const auto protectedBefore=instance->currentValues();
+        instance->applyPreset(9); params->flush(plugin,&empty.input,nullptr);
+        const auto protectedAfter=instance->currentValues();
+        for(std::size_t i=0;i<geiger::Count;++i) if(geiger::presetProtected(i)) require(protectedBefore[i]==protectedAfter[i],"Preset changed protected control");
+        changed=parameter(geiger::Decay,23); change.items={&changed.header}; params->flush(plugin,&change.input,nullptr);
+        require(instance->presetName()=="Velvet reactor *","Edited preset marker missing");
+        saved.clear(); require(state->save(plugin,&stream),"Named state save failed");
+        instance->applyPreset(2); params->flush(plugin,&empty.input,nullptr); reader.offset=0;
+        require(state->load(plugin,&input),"Named state load failed");
+        require(instance->presetName()=="Velvet reactor *","Edited name lost in state reload");
+        // An actual framework-format state with no editor extras models preview .7.
+        const auto legacyValues=instance->currentValues(); saved.clear();
+        require(nullclap::state::save(instance->parameters(),{},&stream),"Legacy fixture write failed");
+        instance->applyPreset(0); params->flush(plugin,&empty.input,nullptr); reader.offset=0;
+        require(state->load(plugin,&input),"Legacy preview state rejected");
+        require(instance->currentValues()==legacyValues,"Legacy preview values changed on load");
+        require(instance->presetName()=="Custom sound","Legacy edited state invented a factory name");
+        std::cout<<"PASS preset provenance, protected controls, edited state and legacy preview loading\n";
         instance.release(); plugin->destroy(plugin);
         std::cout<<"PASS CLAP metadata, sample-offset transport/MIDI, sustain edge cases, 64-bit audition and state round trip\n";
     } catch(const std::exception& e) {std::cerr<<"FAIL: "<<e.what()<<"\n"; return 1;}
