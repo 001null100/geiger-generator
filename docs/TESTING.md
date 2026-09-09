@@ -2,13 +2,13 @@
 
 ## Automated gates
 
-`GeigerEngineTests` checks parameter-ID uniqueness, preset validity, silence, rate statistics, waiting-time variation, non-extendable dead-time throughput and minimum spacing, deterministic replay, block/span invariance, timing independence from click colour, distinct model output, mono symmetry, finite/bounded output under extreme automation, power-off settling and invalid inputs. Sample-rate coverage includes 8, 44.1, 48, 96, 192 and 384 kHz.
+`GeigerEngineTests` checks parameter-ID uniqueness, preset validity, silence, rate statistics, waiting-time variation, non-extendable dead-time throughput and minimum spacing, deterministic replay, block/span invariance, timing independence from click colour, distinct model output, mono symmetry, finite/bounded output under extreme automation, power-off settling and invalid inputs. Sample-rate coverage includes 1, 8, 22.05, 44.1, 96, 192, 384 and 768 kHz, plus fractional rates of 1000.25 and 48000.123 Hz. Activation is explicitly asserted so a silently rejected test rate cannot pass. Pulse tails are checked for non-finite and subnormal float samples without depending on host flush-to-zero settings.
 
-`GeigerHostTests` instantiates the actual null-clap plug-in and exercises parameter discovery, sample-offset MIDI, MIDI gate, sustain/release, output in float/double host buffers and project-state round-trip. It is not a substitute for a real DAW.
+`GeigerHostTests` instantiates the actual null-clap plug-in and exercises parameter discovery, sample-offset MIDI, MIDI gate, sustain/release, output in float/double host buffers, project-state round-trip and repeated activation at eight low, fractional and high sample rates. It is not a substitute for a real DAW.
 
 `GeigerUiSmoke` creates all four real editor pages at 900x660, 1120x760 and 1600x1000, checks control bounds and renders PNGs. It does not prove mouse interaction or high-DPI embedding in every host. Linux screenshots run under Xvfb. The UI-test artifacts allow visual inspection of actual rendered controls rather than mock-ups.
 
-Both CI platforms run clap-validator 0.4.1, build `0.4.1-127-g152b982`, without skipped tests. Publication depends on every build job succeeding. Exact results are recorded in GitHub Actions for each release commit.
+Both CI platforms run clap-validator 0.4.1, build `0.4.1-127-g152b982`, without test-exclusion flags. The validator may automatically skip optional-extension tests that do not apply to this instrument. Publication depends on every build job succeeding. Exact results are recorded in GitHub Actions for each release commit.
 
 `GeigerRender` creates nine five-second stereo WAV examples, ordered like the factory presets. These are generated directly from the production engine at 48 kHz with short edge fades, not external recordings. No loudness normalization is applied.
 

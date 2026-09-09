@@ -8,13 +8,20 @@ namespace {
 constexpr double pi=3.1415926535897932384626433832795;
 double db(double v) noexcept { return std::pow(10.0,v/20.0); }
 double clean(double v) noexcept { return std::abs(v)<1e-18 ? 0.0 : v; }
+float audioSample(double v) noexcept {
+    // A normal double may become a subnormal float when a pulse tail decays.
+    // Flush at the output boundary without relying on a host's CPU FTZ mode.
+    return std::abs(v)<std::numeric_limits<float>::min() ? 0.0f : static_cast<float>(v);
+}
 struct Model { double f1,f2,pulse,ring,noise; };
 constexpr Model models[]={{2100,4300,0.8,0.42,0.12},{3600,6700,0.35,0.9,0.05},
     {950,2300,1.0,0.50,0.2},{650,3100,1.1,0.75,0.28},{1250,2800,0.4,0.28,0.18},{2800,7210,0.18,1.05,0.03}};
 }
 Engine::Engine() noexcept { prepare(48000); }
 bool Engine::prepare(double sr) noexcept {
-    if (!std::isfinite(sr) || sr<8000 || sr>384000) return false;
+    // Offline renderers and hosts may use fractional or extreme sample rates.
+    // All acoustic mode/filter frequencies are bounded relative to this rate.
+    if (!std::isfinite(sr) || sr<1000 || sr>768000) return false;
     sr_=sr; updateCoefficients(); reset(); return true;
 }
 void Engine::configure(Values v) noexcept {
@@ -177,10 +184,12 @@ Frame Engine::tick() noexcept {
     humPhase_+=2*pi*(v[HumFrequency]<0.5 ? 50.0 : 60.0)/sr_; if (humPhase_>=2*pi) humPhase_-=2*pi;
     const double hum=humGain_<1e-12 ? 0.0 : std::sin(humPhase_)+0.15*std::sin(2*humPhase_);
     Frame result;
-    result.left=static_cast<float>(render(channels_[0],pending_[0],modalPending_[0],n,hum));
-    result.right=static_cast<float>(render(channels_[1],pending_[1],modalPending_[1],n,hum));
+    result.left=audioSample(render(channels_[0],pending_[0],modalPending_[0],n,hum));
+    result.right=audioSample(render(channels_[1],pending_[1],modalPending_[1],n,hum));
     pending_={}; modalPending_={}; time_+=1/sr_;
     if ((++maintenance_&255u)==0) {
+        powerGain_=clean(powerGain_); hissGain_=clean(hissGain_); humGain_=clean(humGain_);
+        measured_=clean(measured_); cluster_=clean(cluster_);
         for (auto& c:channels_) {
             c.fast=clean(c.fast); c.slow=clean(c.slow); c.x1=clean(c.x1); c.y1=clean(c.y1);
             c.x2=clean(c.x2); c.y2=clean(c.y2); c.noise=clean(c.noise); c.dcIn=clean(c.dcIn);

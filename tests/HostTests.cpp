@@ -83,6 +83,18 @@ int main() {
             auto& rd=*static_cast<Reader*>(s->ctx); auto count=std::min<std::uint64_t>(n,rd.bytes->size()-rd.offset); std::memcpy(p,rd.bytes->data()+rd.offset,static_cast<std::size_t>(count)); rd.offset+=static_cast<std::size_t>(count); return static_cast<std::int64_t>(count);
         }};
         require(state->load(plugin,&input),"State load failed"); double restored=0; params->get_value(plugin,geiger::parameterId(geiger::Rate),&restored); require(restored==1000,"State did not restore native value");
+        for (double sr:{1000.,1000.25,8000.,44100.,48000.123,96000.,384000.,768000.}) {
+            require(plugin->activate(plugin,sr,1,512),"Host sample-rate reactivation rejected");
+            require(plugin->start_processing(plugin),"Host sample-rate processing failed");
+            instance->testClick();
+            for (int block=0;block<4;++block) {
+                require(plugin->process(plugin,&process)!=CLAP_PROCESS_ERROR,"Host sample-rate process error");
+                for (double x:dl) require(std::isfinite(x) && std::fpclassify(x)!=FP_SUBNORMAL,"Invalid sample after rate change");
+                for (double x:dr) require(std::isfinite(x) && std::fpclassify(x)!=FP_SUBNORMAL,"Invalid right sample after rate change");
+            }
+            plugin->stop_processing(plugin); plugin->deactivate(plugin);
+        }
+        std::cout<<"PASS actual CLAP reactivation from 1 to 768 kHz, including fractional rates\n";
         instance.release(); plugin->destroy(plugin);
         std::cout<<"PASS CLAP metadata, sample-offset transport/MIDI, sustain edge cases, 64-bit audition and state round trip\n";
     } catch(const std::exception& e) {std::cerr<<"FAIL: "<<e.what()<<"\n"; return 1;}

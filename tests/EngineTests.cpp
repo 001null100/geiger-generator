@@ -6,6 +6,11 @@
 #include <vector>
 #include <chrono>
 using namespace geiger;
+constexpr std::array<double,10> sampleRates{{1000.,1000.25,8000.,22050.,44100.,48000.123,96000.,192000.,384000.,768000.}};
+void checkSample(float v) {
+    if (!std::isfinite(v) || std::fpclassify(v)==FP_SUBNORMAL)
+        throw std::runtime_error("Non-finite or subnormal output sample");
+}
 void check(bool v,const char* msg) { if (!v) throw std::runtime_error(msg); }
 Values quiet() { auto v=defaults(); v[Background]=0; v[DeadTime]=0; v[Recovery]=0; v[Attack]=0; return v; }
 void run(Engine& e,int n) { for (int i=0;i<n;++i) e.tick(); }
@@ -17,12 +22,12 @@ int main() {
         }
         for (std::size_t i=0;i<presetNames.size();++i) check(sanitize(preset(i))==preset(i),"Invalid preset");
         std::cout<<"PASS stable IDs and factory values\n";
-        for (double sr:{8000.,44100.,48000.,96000.,192000.,384000.}) {
-            Engine e; auto v=quiet(); v[Rate]=0; e.configure(v); e.prepare(sr); e.setGate(true);
+        for (double sr:sampleRates) {
+            Engine e; auto v=quiet(); v[Rate]=0; e.configure(v); check(e.prepare(sr),"Supported sample rate rejected"); e.setGate(true);
             for (int i=0;i<10000;++i) {auto f=e.tick(); check(f.left==0 && f.right==0,"Zero input not silent");}
             check(e.detected()==0,"Zero rate generated events");
         }
-        std::cout<<"PASS zero-rate silence at six sample rates\n";
+        std::cout<<"PASS activation and zero-rate silence at ten sample rates (including fractional and 1-768 kHz)\n";
         Engine a; auto v=quiet(); v[Rate]=100; a.configure(v); a.prepare(8000); a.setGate(true);
         std::vector<double> waits; double previous=-1;
         std::vector<double> bins;
@@ -69,21 +74,29 @@ int main() {
         }
         std::cout<<"PASS six distinct transducer recipes and mono coherence\n";
         const auto clock=std::chrono::steady_clock::now();
-        for(double sr:{8000.,44100.,48000.,96000.,192000.,384000.}) {
+        for(double sr:sampleRates) {
             Engine e; auto extreme=defaults(); for(std::size_t i=0;i<Count;++i) extreme[i]=definitions[i].maximum;
-            e.configure(extreme); e.prepare(sr); e.setGate(true,1,60);
+            e.configure(extreme); check(e.prepare(sr),"Extreme sample rate rejected"); e.setGate(true,1,60);
             for(int i=0;i<static_cast<int>(sr*0.5);++i) {
                 if(i%521==0) {extreme[ClickModel]=(i/521)%6; extreme[Speaker]=(i/521)%5; e.configure(extreme);}
-                auto f=e.tick(); check(std::isfinite(f.left)&&std::isfinite(f.right),"Non-finite output");
+                auto f=e.tick(); checkSample(f.left); checkSample(f.right);
                 check(std::abs(f.left)<=0.97001f && std::abs(f.right)<=0.97001f,"Output safety bound violated");
             }
             extreme[Power]=0; e.configure(extreme); run(e,static_cast<int>(sr)); auto f=e.tick();
             check(std::abs(f.left)<1e-12 && std::abs(f.right)<1e-12,"Power-off did not fade silent");
         }
         std::cout<<"PASS extreme automation, finite output and power fade ("<<std::chrono::duration<double>(std::chrono::steady_clock::now()-clock).count()<<" s)\n";
+        for (double sr:sampleRates) {
+            Engine e; auto tail=quiet(); tail[Rate]=0; tail[Decay]=0.5; tail[Output]=0;
+            e.configure(tail); check(e.prepare(sr),"Tail sample rate rejected"); e.testClick();
+            for (int i=0;i<static_cast<int>(sr);++i) {auto f=e.tick(); checkSample(f.left); checkSample(f.right);}
+            auto f=e.tick(); check(f.left==0 && f.right==0,"Pulse tail did not settle to exact zero");
+        }
+        std::cout<<"PASS finite, non-subnormal pulse tails without relying on host FTZ settings\n";
         auto bad=defaults(); bad[Rate]=std::numeric_limits<double>::quiet_NaN(); bad[Decay]=std::numeric_limits<double>::infinity();
         a.configure(bad); check(a.values()==defaults(),"Non-finite parameter sanitation failed");
-        check(!a.prepare(0)&&!a.prepare(std::numeric_limits<double>::infinity()),"Invalid sample rate accepted");
+        for (double sr:{-1.,0.,999.,768001.,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()})
+            check(!a.prepare(sr),"Invalid or out-of-range sample rate accepted");
         std::cout<<"PASS invalid-input rejection\nAll DSP checks passed.\n";
     } catch (const std::exception& e) {std::cerr<<"FAIL: "<<e.what()<<"\n"; return 1;}
 }
