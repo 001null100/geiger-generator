@@ -1,9 +1,9 @@
 """Package tested binaries, documentation and dependency licence notices."""
 from pathlib import Path
+import hashlib
 import os
 import shutil
 import sys
-import urllib.request
 import zipfile
 
 root = Path(__file__).resolve().parents[1]
@@ -21,10 +21,13 @@ for name in ("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
 shutil.copytree(root / "docs", stage / "docs")
 licences = stage / "licences"
 licences.mkdir()
-with urllib.request.urlopen("https://www.gnu.org/licenses/agpl-3.0.txt", timeout=60) as response:
-    text = response.read()
-if b"GNU AFFERO GENERAL PUBLIC LICENSE" not in text:
-    raise RuntimeError("Unexpected AGPL licence response")
+# Use the checked-in, verbatim licence. Packaging must work offline and must
+# not depend on a third-party website accepting a hosted runner's request.
+# read_text normalizes checkout line endings before validating the source text.
+text = (root / "licences" / "AGPL-3.0.txt").read_text(encoding="utf-8").encode("utf-8")
+expected = "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
+if hashlib.sha256(text).hexdigest() != expected:
+    raise RuntimeError("Bundled AGPL licence text failed its integrity check")
 (licences / "AGPL-3.0.txt").write_bytes(text)
 for dep in ("null_clap", "clap", "clap_helpers", "juce"):
     source = build / "_deps" / (dep + "-src")
